@@ -33,7 +33,9 @@ class APIProber:
                 spec = yaml.safe_load(f)
 
             paths = spec.get("paths", {})
+            print(f"DEBUG: Found {len(paths)} paths in spec: {list(paths.keys())}")
             for path, methods in paths.items():
+                print(f"DEBUG: Processing path {path} with methods {list(methods.keys())}")
                 for method, details in methods.items():
                     if method.lower() in ["get", "post", "put", "delete", "patch"]:
                         self.endpoints.append(

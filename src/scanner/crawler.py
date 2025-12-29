@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import json
 import re
 from collections import deque
@@ -7,6 +8,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.async_api import Page, async_playwright
+
+from scanner.analyzer import detect_api_prefix
 
 
 class AsyncCrawler:
@@ -145,21 +148,30 @@ class AsyncCrawler:
                 # We do this in finally to output spec even if interrupted
                 if hasattr(self, "output_spec") and self.output_spec:
                     print(f"Generating OpenAPI Spec to {self.output_spec}...")
+
+                    # Detect Prefix
+                    detected_prefix = detect_api_prefix(self.output_har, target_url=self.start_url)
+                    target_prefix = detected_prefix or self.root_url
+                    print(f"Using API Prefix: {target_prefix}")
+
                     try:
                         from mitmproxy2swagger.mitmproxy2swagger import process_to_spec
 
                         process_to_spec(
                             input_file=self.output_har,
                             output_file=self.output_spec,
-                            api_prefix=self.root_url,
+                            api_prefix=target_prefix,
                             input_format="har",
                             auto_approve_paths=True,
                         )
                         print(f"Spec generated successfully: {self.output_spec}")
                     except ImportError:
                         print("Could not import mitmproxy2swagger. Make sure it is in the python path.")
-                    except Exception as e:
-                        print(f"Failed to generate spec: {e}")
+                    except Exception:
+                        import traceback
+
+                        traceback.print_exc()
+                        print("Failed to generate spec due to an exception.")
 
     async def process_page(self, page: Page, url: str, depth: int):
         # Goto and wait for network idle to ensure XHRs fire
@@ -189,7 +201,7 @@ class AsyncCrawler:
 
                 filled = False
                 for input_el in inputs:
-                    try:
+                    with contextlib.suppress(Exception):
                         # Check visibility
                         if not await input_el.is_visible():
                             continue
@@ -209,8 +221,6 @@ class AsyncCrawler:
                         if input_val:
                             await input_el.fill(input_val)
                             filled = True
-                    except Exception:
-                        pass  # Ignore fill errors
 
                 if filled:
                     # Try to submit

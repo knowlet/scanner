@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from mitmproxy2swagger.mitmproxy2swagger import process_to_spec
 
 # Imports from local modules
+from scanner.analyzer import detect_api_prefix
 from scanner.crawler import run_crawler
 from scanner.prober import run_prober
 
@@ -62,6 +63,11 @@ async def async_main():
         state_file=args.state_file,
     )
 
+    # Detect Prefix from HAR after crawling
+    detected_prefix = detect_api_prefix(args.har_file, target_url=args.url)
+    target_prefix = detected_prefix or args.url
+    print(f"Detected API Prefix for Probing: {target_prefix}")
+
     print("\n=== Step 2: Starting Proxy ===")
     # Start mitmdump in background
     proxy_url = f"http://127.0.0.1:{args.proxy_port}"
@@ -79,7 +85,9 @@ async def async_main():
             return
 
         print("\n=== Step 3: Probing/Fuzzing ===")
-        await run_prober(args.initial_spec, args.url, proxy_url, samples=5, headers=headers, cookies=prober_cookies)
+        await run_prober(
+            args.initial_spec, target_prefix, proxy_url, samples=5, headers=headers, cookies=prober_cookies
+        )
 
     finally:
         print("\n=== Stopping Proxy ===")
@@ -93,10 +101,12 @@ async def async_main():
 
     print("\n=== Step 4: Generating Final Spec ===")
     try:
+        print(f"Using API Prefix: {target_prefix}")
+
         process_to_spec(
             input_file=args.fuzzing_dump,
             output_file=args.final_spec,
-            api_prefix=args.url,
+            api_prefix=target_prefix,
             input_format="flow",
             auto_approve_paths=True,
         )
