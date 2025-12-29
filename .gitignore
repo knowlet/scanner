@@ -179,3 +179,4 @@ pyrightconfig.json
 *_spec.yaml
 *.har
 *.mitm
+crawler_state.json

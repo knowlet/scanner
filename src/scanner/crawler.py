@@ -1,7 +1,9 @@
 import argparse
 import asyncio
+import json
 import re
 from collections import deque
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.async_api import Page, async_playwright
@@ -25,6 +27,28 @@ class AsyncCrawler:
         self.queue: deque[tuple[str, int]] = deque([(start_url, 0)])
         self.domain = urlparse(start_url).netloc
         self.root_url = f"{urlparse(start_url).scheme}://{self.domain}"
+        self.state_path: Path | None = None
+
+    def save_state(self):
+        if not self.state_path:
+            return
+        state = {
+            "visited": list(self.visited),
+            "queue": list(self.queue),
+        }
+        with open(self.state_path, "w") as f:
+            json.dump(state, f)
+
+    def load_state(self, path: str):
+        self.state_path = Path(path)
+        if self.state_path.exists():
+            with open(self.state_path) as f:
+                state = json.load(f)
+                self.visited = set(state.get("visited", []))
+                self.queue = deque([(item[0], item[1]) for item in state.get("queue", [])])
+            print(f"Loaded state from {path}: {len(self.visited)} visited, {len(self.queue)} in queue")
+        else:
+            print(f"State file {path} not found, starting fresh.")
 
     def is_valid_url(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -74,61 +98,77 @@ class AsyncCrawler:
             # Optional: Add simple console listener to catch printed API endpoints if any
             # page.on("console", lambda msg: print(f"CONSOLE: {msg.text}"))
 
-            print(f"Starting crawl from {self.start_url}")
+            print(f"Starting crawl from {self.start_url} (debug mode)")
 
-            while self.queue:
-                current_url, depth = self.queue.popleft()
+            try:
+                while self.queue:
+                    current_url, depth = self.queue.popleft()
 
-                if current_url in self.visited:
-                    continue
+                    if current_url in self.visited:
+                        continue
 
-                if depth > self.max_depth:
-                    continue
+                    if depth > self.max_depth:
+                        continue
 
-                self.visited.add(current_url)
-                print(f"[{depth}] Visiting: {current_url}")
+                    self.visited.add(current_url)
+                    print(f"[{depth}] Visiting: {current_url}")
 
-                try:
-                    # Goto and wait for network idle to ensure XHRs fire
-                    await page.goto(current_url, wait_until="networkidle", timeout=10000)
-                except Exception as e:
-                    print(f"Failed to load {current_url}: {e}")
-                    continue
+                    try:
+                        # Goto and wait for network idle to ensure XHRs fire
+                        await page.goto(current_url, wait_until="networkidle", timeout=10000)
+                    except Exception as e:
+                        print(f"Failed to load {current_url}: {e}")
+                        continue
 
-                # If we are not at max depth, extract links
-                if depth < self.max_depth:
-                    links = await self.extract_links(page)
-                    for link in links:
-                        if self.is_valid_url(link):
-                            self.queue.append((link, depth + 1))
+                    # If we are not at max depth, extract links
+                    if depth < self.max_depth:
+                        links = await self.extract_links(page)
+                        for link in links:
+                            if self.is_valid_url(link):
+                                self.queue.append((link, depth + 1))
 
-                # Short sleep to be polite (and let more things load if needed)
-                await asyncio.sleep(0.5)
+                    # Save state after each visit
+                    self.save_state()
 
-            print("Crawl finished.")
-            # Context close saves the HAR
-            await context.close()
-            await browser.close()
-            print(f"Traffic saved to {self.output_har}")
+                    # Short sleep to be polite (and let more things load if needed)
+                    await asyncio.sleep(0.5)
 
-            # Auto-generate Spec
-            if hasattr(self, "output_spec") and self.output_spec:
-                print(f"Generating OpenAPI Spec to {self.output_spec}...")
-                try:
-                    from mitmproxy2swagger.mitmproxy2swagger import process_to_spec
+                print("Crawl finished.")
 
-                    process_to_spec(
-                        input_file=self.output_har,
-                        output_file=self.output_spec,
-                        api_prefix=self.root_url,
-                        input_format="har",
-                        auto_approve_paths=True,
-                    )
-                    print(f"Spec generated successfully: {self.output_spec}")
-                except ImportError:
-                    print("Could not import mitmproxy2swagger. Make sure it is in the python path.")
-                except Exception as e:
-                    print(f"Failed to generate spec: {e}")
+            finally:
+                # Context close saves the HAR
+                print(f"Closing browser context (saving HAR to {self.output_har})...")
+                await context.close()
+                print("Browser context closed.")
+                await browser.close()
+                print("Browser closed.")
+                print(f"Traffic saved to {self.output_har}")
+
+                # Cleanup state file on successful finish only if queue is empty
+                if not self.queue and self.state_path and self.state_path.exists():
+                    self.state_path.unlink()
+                    print(f"Cleaned up state file {self.state_path}")
+
+                # Auto-generate Spec
+                # Only if output_spec is set (it might not be if just crawling)
+                # We do this in finally to output spec even if interrupted
+                if hasattr(self, "output_spec") and self.output_spec:
+                    print(f"Generating OpenAPI Spec to {self.output_spec}...")
+                    try:
+                        from mitmproxy2swagger.mitmproxy2swagger import process_to_spec
+
+                        process_to_spec(
+                            input_file=self.output_har,
+                            output_file=self.output_spec,
+                            api_prefix=self.root_url,
+                            input_format="har",
+                            auto_approve_paths=True,
+                        )
+                        print(f"Spec generated successfully: {self.output_spec}")
+                    except ImportError:
+                        print("Could not import mitmproxy2swagger. Make sure it is in the python path.")
+                    except Exception as e:
+                        print(f"Failed to generate spec: {e}")
 
     async def extract_links(self, page: Page) -> set[str]:
         links = set()
@@ -154,8 +194,16 @@ async def run_crawler(
     spec: str = None,
     headers: dict[str, str] = None,
     cookies: list[dict] = None,
+    resume: bool = False,
+    state_file: str = "crawler_state.json",
 ):
     crawler = AsyncCrawler(url, depth, out, headers=headers, cookies=cookies)
+    if resume:
+        crawler.load_state(state_file)
+    else:
+        # If not resuming, we still might want to enable saving state for future resumes
+        crawler.state_path = Path(state_file)
+
     if spec:
         crawler.output_spec = spec
     await crawler.crawl()
@@ -173,6 +221,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cookie", action="append", help="Extra cookie (e.g. 'session=123'). Can be used multiple times."
     )
+    parser.add_argument("--resume", action="store_true", help="Resume from previous state")
+    parser.add_argument("--state-file", default="crawler_state.json", help="Path to state file")
 
     args = parser.parse_args()
 
@@ -194,4 +244,15 @@ if __name__ == "__main__":
                 k, v = c.split("=", 1)
                 cookies.append({"name": k.strip(), "value": v.strip(), "domain": domain, "path": "/"})
 
-    asyncio.run(run_crawler(args.url, args.depth, args.out, args.spec, headers, cookies))
+    asyncio.run(
+        run_crawler(
+            args.url,
+            args.depth,
+            args.out,
+            args.spec,
+            headers,
+            cookies,
+            resume=args.resume,
+            state_file=args.state_file,
+        )
+    )

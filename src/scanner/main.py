@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import os
 import signal
 import subprocess
@@ -26,6 +27,8 @@ async def async_main():
     parser.add_argument("--initial-spec", default="initial_spec.yaml", help="Initial Spec file")
     parser.add_argument("--fuzzing-dump", default="fuzzing.mitm", help="Intermediate mitm dump from prober")
     parser.add_argument("--final-spec", default="final_spec.yaml", help="Final OpenAPI Spec file")
+    parser.add_argument("--resume", action="store_true", help="Resume from previous crawl state")
+    parser.add_argument("--state-file", default="crawler_state.json", help="Crawler state file")
 
     args = parser.parse_args()
 
@@ -48,7 +51,16 @@ async def async_main():
                 prober_cookies[k.strip()] = v.strip()
 
     print("=== Step 1: Crawling ===")
-    await run_crawler(args.url, args.depth, args.har_file, args.initial_spec, headers=headers, cookies=cookies)
+    await run_crawler(
+        args.url,
+        args.depth,
+        args.har_file,
+        args.initial_spec,
+        headers=headers,
+        cookies=cookies,
+        resume=args.resume,
+        state_file=args.state_file,
+    )
 
     print("\n=== Step 2: Starting Proxy ===")
     # Start mitmdump in background
@@ -75,10 +87,8 @@ async def async_main():
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
             process.wait(timeout=5)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 process.kill()
-            except Exception:
-                pass
         print("Proxy stopped.")
 
     print("\n=== Step 4: Generating Final Spec ===")
@@ -96,7 +106,10 @@ async def async_main():
 
 
 def main():
-    asyncio.run(async_main())
+    try:
+        asyncio.run(async_main())
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nScanner stopped by user. Partial results saved.")
 
 
 if __name__ == "__main__":
