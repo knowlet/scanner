@@ -1,0 +1,47 @@
+[project]
+name = "scanner"
+version = "0.1.0"
+description = "Active Scanner for Mitmproxy2Swagger"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.49.1",
+    "beautifulsoup4>=4.12.3",
+    "mitmproxy>=10.4.2",
+    "httpx>=0.28.1",
+    "pyyaml>=6.0.2",
+    "ruamel.yaml>=0.18.6",
+    "mitmproxy2swagger @ git+https://github.com/knowlet/mitmproxy2swagger",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9.0",
+    "pre-commit>=4.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[project.scripts]
+scanner = "scanner.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scanner"]
+
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "C4", "UP"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
