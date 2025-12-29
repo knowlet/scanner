@@ -114,23 +114,14 @@ class AsyncCrawler:
                     print(f"[{depth}] Visiting: {current_url}")
 
                     try:
-                        # Goto and wait for network idle to ensure XHRs fire
-                        await page.goto(current_url, wait_until="networkidle", timeout=10000)
+                        await self.process_page(page, current_url, depth)
                     except Exception as e:
-                        print(f"Failed to load {current_url}: {e}")
-                        continue
-
-                    # If we are not at max depth, extract links
-                    if depth < self.max_depth:
-                        links = await self.extract_links(page)
-                        for link in links:
-                            if self.is_valid_url(link):
-                                self.queue.append((link, depth + 1))
+                        print(f"Failed to process {current_url}: {e}")
 
                     # Save state after each visit
                     self.save_state()
 
-                    # Short sleep to be polite (and let more things load if needed)
+                    # Short sleep to be polite
                     await asyncio.sleep(0.5)
 
                 print("Crawl finished.")
@@ -169,6 +160,82 @@ class AsyncCrawler:
                         print("Could not import mitmproxy2swagger. Make sure it is in the python path.")
                     except Exception as e:
                         print(f"Failed to generate spec: {e}")
+
+    async def process_page(self, page: Page, url: str, depth: int):
+        # Goto and wait for network idle to ensure XHRs fire
+        await page.goto(url, wait_until="networkidle", timeout=10000)
+
+        # 1. Handle Forms (Fill and Submit to capture POST/PUT)
+        await self.handle_forms(page)
+
+        # 2. Extract Links (if not at max depth)
+        if depth < self.max_depth:
+            links = await self.extract_links(page)
+            for link in links:
+                if self.is_valid_url(link):
+                    self.queue.append((link, depth + 1))
+
+    async def handle_forms(self, page: Page):
+        """Finds forms, fills them with dummy data, and submits them."""
+        try:
+            forms = await page.locator("form").all()
+            if not forms:
+                return
+
+            print(f"Found {len(forms)} forms on {page.url}")
+            for i, form in enumerate(forms):
+                # Re-query inputs to avoid stale elements if DOM updated
+                inputs = await form.locator("input:not([type='hidden']), textarea").all()
+
+                filled = False
+                for input_el in inputs:
+                    try:
+                        # Check visibility
+                        if not await input_el.is_visible():
+                            continue
+
+                        input_type = await input_el.get_attribute("type") or "text"
+                        input_name = await input_el.get_attribute("name") or ""
+                        input_val = ""
+
+                        # Dummy data logic
+                        if input_type == "password":
+                            input_val = "Password123!"
+                        elif input_type == "email" or "email" in input_name.lower():
+                            input_val = "test@example.com"
+                        elif input_type in ["text", "search", "url"]:
+                            input_val = "testuser"
+
+                        if input_val:
+                            await input_el.fill(input_val)
+                            filled = True
+                    except Exception:
+                        pass  # Ignore fill errors
+
+                if filled:
+                    # Try to submit
+                    submit_selector = (
+                        "input[type='submit'], button[type='submit'], "
+                        "button:has-text('Login'), button:has-text('Sign In'), "
+                        "button:has-text('Submit')"
+                    )
+                    submit_button = form.locator(submit_selector).first
+                    if await submit_button.count() > 0 and await submit_button.is_visible():
+                        print(f"Submitting form {i + 1}...")
+                        # We use a short timeout because submission might trigger navigation or just XHR
+                        # We don't want to wait forever if it's just a validation error
+                        try:
+                            # Use Promise.all to catch navigation or just wait a bit
+                            # But since we just want to trigger the request for HAR, clicking is often enough.
+                            # We catch timeout in case it hangs.
+                            await submit_button.click(timeout=3000)
+                            # Give it a moment to fire requests
+                            await page.wait_for_timeout(2000)
+                        except Exception as e:
+                            print(f"Form submission wait warning: {e}")
+
+        except Exception as e:
+            print(f"Error handling forms: {e}")
 
     async def extract_links(self, page: Page) -> set[str]:
         links = set()
